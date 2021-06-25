@@ -17,6 +17,7 @@ learned_entry_context_footer = "\n\n> :brain: I learned this based on previous q
 file_context_footer = "\n\n> :page_with_curl: This information was extracted from a file provided to me by your instructor."
 
 message_link_pattern = re.compile("<https://(?P<team>\S+\.slack\.com)/archives/(?P<channel>\S+)/p(?P<ts>\d+)>\s*(?P<answer>.+$)")
+mention_pattern = re.compile("\s*<@[\w|\d]+>\s*")
 
 unknown_answer_responses_prefixes = [
 	"Sorry",

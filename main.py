@@ -1,5 +1,7 @@
 import os
+import re
 import urllib
+import hashlib
 
 from slack_bolt import App, BoltResponse
 
@@ -156,10 +158,6 @@ def get_dialogflow_response(text, team_id, user_id):
 
 	unknown_response = app_constants.get_unknown_answer_response()
 
-	# Determine where the information is coming from based on its header.
-	team_manual_entry_header = f"{team_id}|{app_constants.manual_entry_header}|"
-	team_learned_entry_header = f"{team_id}|{app_constants.learned_entry_header}|"
-
 	# If we got back a potential answer from the knowledge base, use it.
 	if detected_knowledge.answers:
 		best_answer = detected_knowledge.answers[0]
@@ -179,10 +177,10 @@ def get_dialogflow_response(text, team_id, user_id):
 		)
 
 		# Add the context footer to the message depending on the source.
-		if document.display_name.startswith(team_manual_entry_header):
+		if document.display_name.startswith(app_constants.manual_entry_header):
 			response += app_constants.manual_entry_context_footer
 			response = response[1:]
-		elif document.display_name.startswith(team_learned_entry_header):
+		elif document.display_name.startswith(app_constants.learned_entry_header):
 			response += app_constants.learned_entry_context_footer
 			response = response[1:]
 		else:
@@ -196,10 +194,11 @@ def upload_question_answer_pair(question, answer, client, context, ack=None, lea
 	team_id = context["team_id"]
 
 	# Format the data within the file to allow for cleaner seperation later. We don't want to partition in the wrong place.
-	raw_content = f'"{question}|","|{answer}"'
+	raw_content = f'"{question}","|{answer}"'
+	uid = hashlib.md5(raw_content.encode()).hexdigest()
 
 	# Construct the filename using the appropriate entry header. This ensures it will be unique and identifiable.
-	file_name = f"{team_id}|{app_constants.learned_entry_header if learned else app_constants.manual_entry_header}|{hash(raw_content)}.csv"
+	file_name = f"{app_constants.learned_entry_header if learned else app_constants.manual_entry_header}|{uid}.csv"
 
 	existing_knowledge_base = knowledge_base_utils.get_knowledge_base_by_name(
 		project_id=project_id,
@@ -215,14 +214,19 @@ def upload_question_answer_pair(question, answer, client, context, ack=None, lea
 
 	knowledge_base_id = existing_knowledge_base.name.rpartition("/")[2]
 
-	existing_document = document_utils.get_document_by_name(
+	documents_response = document_utils.list_documents(
 		project_id=project_id,
-		knowledge_base_id=knowledge_base_id,
-		document_name=file_name)
+		knowledge_base_id=knowledge_base_id
+	)
+
+	# Iterate over the documents to load them all in.
+	documents = [x for x in documents_response]
+
+	existing_document = [x for x in documents if os.path.splitext(x.display_name)[0].endswith(f"{uid}")]
 
 	if not existing_document and team_id in uploading_entries:
 		for document in uploading_entries[team_id]:
-			if document[1] == file_name:
+			if os.path.splitext(document[1].display_name)[0].endswith(f"{uid}"):
 				existing_document = document
 
 	# If this exact entry already exists, reject it.
@@ -294,9 +298,6 @@ def update_app_home(client, context):
 		knowledge_base_id=knowledge_base_id
 	)
 
-	team_manual_entry_header = f"{team_id}|{app_constants.manual_entry_header}|"
-	team_learned_entry_header = f"{team_id}|{app_constants.learned_entry_header}|"
-
 	# Iterate over the documents to load them all in.
 	documents = [x for x in documents_response]
 
@@ -305,15 +306,15 @@ def update_app_home(client, context):
 	removed_entries = removing_entries.get(team_id, [])
 
 	# Classify entries based on their header. Remove any entries also currently being removed.
-	manual_entries = [x for x in documents if x.display_name.startswith(team_manual_entry_header) and x not in removed_entries]
-	learned_entries = [x for x in documents if x.display_name.startswith(team_learned_entry_header) and x not in removed_entries]
+	manual_entries = [x for x in documents if x.display_name.startswith(app_constants.manual_entry_header) and x not in removed_entries]
+	learned_entries = [x for x in documents if x.display_name.startswith(app_constants.learned_entry_header) and x not in removed_entries]
 
 	# Get the cached file uploads and removals if there are any.
 	uploaded_files = uploading_files.get(team_id, [])
 	removed_files = removing_files.get(team_id, [])
 
 	# Anything that wasn't an entry was a file. Remove any files also currently being removed.
-	files = [x for x in documents if not x.display_name.startswith(team_manual_entry_header) and not x.display_name.startswith(team_learned_entry_header) and not x in removed_files]
+	files = [x for x in documents if not x.display_name.startswith(app_constants.manual_entry_header) and not x.display_name.startswith(app_constants.learned_entry_header) and not x in removed_files]
 
 	view = {
 			"type": "home",
@@ -344,7 +345,7 @@ def update_app_home(client, context):
 				raw_content = document.raw_content.decode("utf-8")[1:-1]
 				
 				# Partition the text around the attempted unique separator.
-				question, sep, answer = raw_content.partition('|","|')
+				question, sep, answer = raw_content.partition('","|')
 				view["blocks"].append(app_constants.app_home_manual_entry_view(document.display_name, question, answer))
 				view["blocks"].append(app_constants.divide)
 
@@ -373,7 +374,7 @@ def update_app_home(client, context):
 					break
 			else:
 				raw_content = document.raw_content.decode("utf-8")[1:-1]
-				question, sep, answer = raw_content.partition('|","|')
+				question, sep, answer = raw_content.partition('","|')
 				view["blocks"].append(app_constants.app_home_learned_entry_view(document.display_name, question, answer))
 				view["blocks"].append(app_constants.divide)
 
@@ -445,20 +446,18 @@ def handle_app_home_opened(client, event, context):
 
 @app.event("app_mention")
 def handle_mention(event, say):
-	text = event["text"]
+	text = re.sub(app_constants.mention_pattern, '', event["text"])
 	team_id = event["team"]
 	user_id = event["user"]
 
-	# thread_ts = event.get("thread_ts", None) or event["ts"]
-	say(get_dialogflow_response(text, team_id, user_id))
-	# say(get_dialogflow_response(text, team_id, user_id), thread_ts=thread_ts)
+	say(get_dialogflow_response(text, team_id, user_id), thread_ts=event.get("thread_ts", None))
 
 @app.event("message")
 def handle_message(message, client, say, context):
 	if not "text" in message:
 		return
 
-	text = message["text"]
+	text = re.sub(app_constants.mention_pattern, '', message["text"])
 	team_id = message["team"]
 	user_id = message["user"]
 	ts = message["ts"]
@@ -466,7 +465,7 @@ def handle_message(message, client, say, context):
 
 	# Check if someone direct messaged a question.
 	if message["channel_type"] == "im":
-		return say(get_dialogflow_response(text, team_id, user_id))
+		return say(get_dialogflow_response(text, team_id, user_id), thread_ts=message.get("thread_ts", None))
 
 	# Maybe an instructor was replying to a question? Check and see.
 	if not check_user_permission(client, user_id):
