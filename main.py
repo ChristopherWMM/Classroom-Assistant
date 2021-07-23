@@ -6,6 +6,7 @@ import hashlib
 from slack_bolt import App, BoltResponse
 
 from flask import Flask, request
+from flask_talisman import Talisman
 from slack_bolt.adapter.flask import SlackRequestHandler
 
 from slack_bolt.oauth.oauth_settings import OAuthSettings
@@ -85,7 +86,12 @@ app = App(
 # Flask
 
 flask_app = Flask(__name__)
+Talisman(flask_app)
 handler = SlackRequestHandler(app)
+
+@flask_app.route("/")
+def homepage():
+	return "<h1>Online! 🤖</h1>"
 
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
