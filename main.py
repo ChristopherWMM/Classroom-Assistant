@@ -2,17 +2,20 @@ import os
 import re
 import urllib
 import hashlib
+import logging
 
 from slack_bolt import App, BoltResponse
 
-from flask import Flask, request
-from flask_talisman import Talisman
+from flask import Flask, request, make_response
 from slack_bolt.adapter.flask import SlackRequestHandler
 
 from slack_bolt.oauth.oauth_settings import OAuthSettings
-from slack_sdk.oauth.state_store import FileOAuthStateStore
-from slack_sdk.oauth.installation_store import FileInstallationStore
 from slack_bolt.oauth.callback_options import CallbackOptions, SuccessArgs, FailureArgs
+
+from slack_sdk.oauth.installation_store.sqlalchemy import SQLAlchemyInstallationStore
+from slack_sdk.oauth.state_store.sqlalchemy import SQLAlchemyOAuthStateStore
+
+import sqlalchemy
 
 from slack_utils import app_constants
 from dialogflow_utils import knowledge_base_utils, document_utils, intent_utils
@@ -22,6 +25,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Globals
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 project_id = os.environ.get("DIALOGFLOW_PROJECT_ID")
 
@@ -55,10 +61,32 @@ def failure(args: FailureArgs) -> BoltResponse:
 	return BoltResponse(status=args.suggested_status_code, body=args.reason)
 
 # App
+database_url = os.getenv("DATABASE_URL")
+if database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
+
+engine = sqlalchemy.create_engine(database_url)
+installation_store = SQLAlchemyInstallationStore(
+    client_id=os.environ.get("SLACK_CLIENT_ID"),
+    engine=engine,
+    logger=logger,
+)
+
+oauth_state_store = SQLAlchemyOAuthStateStore(
+    expiration_seconds=120,
+    engine=engine,
+    logger=logger,
+)
+
+try:
+    engine.execute("select count(*) from slack_bots")
+except Exception as e:
+    installation_store.metadata.create_all(engine)
+    oauth_state_store.metadata.create_all(engine)
 
 app = App(
 	signing_secret=os.environ.get("SLACK_SIGNING_SECRET"),
-	installation_store=FileInstallationStore(base_dir=app_constants.install_data_path),
+	installation_store=installation_store,
 	oauth_settings=OAuthSettings(
 		client_id=os.environ.get("SLACK_CLIENT_ID"),
 		client_secret=os.environ.get("SLACK_CLIENT_SECRET"),
@@ -78,7 +106,7 @@ app = App(
 		redirect_uri=None,
 		install_path="/slack/install",
 		redirect_uri_path="/slack/oauth_redirect",
-		state_store=FileOAuthStateStore(expiration_seconds=600),
+		state_store=oauth_state_store,
 		callback_options=CallbackOptions(success=success, failure=failure),
 	)
 )
@@ -86,22 +114,29 @@ app = App(
 # Flask
 
 flask_app = Flask(__name__)
-Talisman(flask_app)
 handler = SlackRequestHandler(app)
 
 @flask_app.route("/")
 def homepage():
 	return "<h1>Online! 🤖</h1>"
 
+from expiringdict import ExpiringDict
+event_cache = ExpiringDict(max_len=100, max_age_seconds=120)
+
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
-	return handler.handle(request)
-
+	event_id = request.get_json()["event_id"]
+	if event_id not in event_cache:
+		event_cache[event_id] = request
+		response = handler.handle(request)
+	else:
+		response = make_response("", 429)
+		response.headers.add_header("X-Slack-No-Retry", 1)
+	return response
 
 @flask_app.route("/slack/install", methods=["GET"])
 def install():
 	return handler.handle(request)
-
 
 @flask_app.route("/slack/oauth_redirect", methods=["GET"])
 def oauth_redirect():
@@ -427,9 +462,6 @@ def handle_app_uninstalled(context):
 		team_id=team_id
 	)
 
-	if os.path.exists(f"{app_constants.install_data_path}/none-{team_id}"):
-		os.rmdir(f"{app_constants.install_data_path}/none-{team_id}")
-
 	# Delete DialogFlow data.
 	existing_knowledge_base = knowledge_base_utils.get_knowledge_base_by_name(
 		project_id=project_id,
@@ -459,7 +491,7 @@ def handle_mention(event, say):
 	say(get_dialogflow_response(text, team_id, user_id), thread_ts=event.get("thread_ts", None))
 
 @app.event("message")
-def handle_message(message, client, say, context):
+def handle_message(message, client, say, context, event):
 	if not "text" in message:
 		return
 
