@@ -125,6 +125,9 @@ event_cache = ExpiringDict(max_len=100, max_age_seconds=120)
 
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
+	if not request.is_json:
+		return handler.handle(request)
+
 	event_id = request.get_json()["event_id"]
 	if event_id not in event_cache:
 		event_cache[event_id] = request
@@ -209,6 +212,19 @@ def get_dialogflow_response(text, team_id, user_id):
 
 		# If the best answer doesn't have a high confidence, 
 		if best_answer.match_confidence_level != HIGH:
+			if response.startswith("|"):
+				response = response[1:]
+
+			# For logging purposes (currently unused)
+			interaction = {
+					"question" : text,
+					"response" : unknown_response,
+					"best_answer" : response,
+					"confidence" : str(best_answer.match_confidence_level),
+					"found" : True,
+					"sent" : False
+				}
+
 			return unknown_response
 
 		document = document_utils.get_document_by_id(
@@ -219,16 +235,37 @@ def get_dialogflow_response(text, team_id, user_id):
 
 		# Add the context footer to the message depending on the source.
 		if document.display_name.startswith(app_constants.manual_entry_header):
-			response += app_constants.manual_entry_context_footer
+			footer = app_constants.manual_entry_context_footer
+			document_type = "Manual Entry"
 			response = response[1:]
 		elif document.display_name.startswith(app_constants.learned_entry_header):
-			response += app_constants.learned_entry_context_footer
+			footer = app_constants.learned_entry_context_footer
+			document_type = "Learned Entry"
 			response = response[1:]
 		else:
-			response += app_constants.file_context_footer
+			document_type = "Bulk file"
+			footer =  app_constants.file_context_footer
 
-		return response
+		# For logging purposes (currently unused)
+		interaction = {
+					"question" : text,
+					"response" : response,
+					"confidence" : str(best_answer.match_confidence_level),
+					"found" : True,
+					"sent" : True,
+					"document_type" : document_type
+				}
+
+		return response + footer
 	else:
+		# For logging purposes (currently unused)
+		interaction = {
+					"question" : text,
+					"response" : unknown_response,
+					"found" : False,
+					"sent" : False
+				}
+
 		return unknown_response
 
 def upload_question_answer_pair(question, answer, client, context, ack=None, learned=False):
@@ -247,8 +284,7 @@ def upload_question_answer_pair(question, answer, client, context, ack=None, lea
 	)
 
 	if not existing_knowledge_base and ack:
-		ack(response_action="errors", errors={"add-entry-input-question":"This workspace has not been setup yet!",
-											  "add-entry-input-answer":"This workspace has not been setup yet!"})
+		ack(response_action="errors", errors={"add-entry-input-question":"This workspace has not been setup yet!", "add-entry-input-answer":"This workspace has not been setup yet!"})
 		return False
 	elif not existing_knowledge_base:
 		return False
@@ -272,8 +308,7 @@ def upload_question_answer_pair(question, answer, client, context, ack=None, lea
 
 	# If this exact entry already exists, reject it.
 	if existing_document and ack:
-		ack(response_action="errors", errors={"add-entry-input-question":"This entry already exists!",
-											  "add-entry-input-answer":"This entry already exists!"})
+		ack(response_action="errors", errors={"add-entry-input-question":"This entry already exists!", "add-entry-input-answer":"This entry already exists!"})
 		return False
 	elif existing_document:
 		return False
@@ -316,8 +351,8 @@ def update_app_home(client, context):
 	# Don't show the user if they don't have permission.
 	if not check_user_permission(client, user_id):
 		return client.views_publish(
-    		user_id=user_id,
-    		view=app_constants.app_home_no_permissions_view
+			user_id=user_id,
+			view=app_constants.app_home_no_permissions_view
 		)
 
 	existing_knowledge_base = knowledge_base_utils.get_knowledge_base_by_name(
@@ -327,8 +362,8 @@ def update_app_home(client, context):
 
 	if existing_knowledge_base is None:
 		return client.views_publish(
-    		user_id=user_id,
-    		view=app_constants.app_home_no_knowledge_base_view
+			user_id=user_id,
+			view=app_constants.app_home_no_knowledge_base_view
 		)
 
 	knowledge_base_id = existing_knowledge_base.name.rpartition("/")[2]
@@ -446,8 +481,8 @@ def update_app_home(client, context):
 		view["blocks"].append(app_constants.divide)
 
 	client.views_publish(
-    	user_id=user_id,
-    	view=view
+		user_id=user_id,
+		view=view
 	)
 
 # Event Listeners

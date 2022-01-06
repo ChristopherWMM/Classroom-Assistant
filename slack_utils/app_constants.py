@@ -34,7 +34,8 @@ unknown_answer_responses = [
 ]
 
 unknown_answer_responses_suffixes = [
-	"Can you try to rephrase your question? :sweat:"
+	"Can you try to rephrase your question? :sweat:",
+	"Would you mind rephrasing your question? :sweat:"
 ]
 
 def get_unknown_answer_response():
